@@ -24,16 +24,15 @@ from subprocess import call
 # Setup #
 #########
 
-recordcmd = '/usr/local/ffmpeg-3.4.1/ffmpeg -loglevel error -thread_queue_size 256 -f alsa -i hw:2,0 -framerate 60 -thread_queue_size 512 -f v4l2 -i /dev/video0 -acodec aac -af "volume=20dB" -vcodec h264_nvenc -b:a 128k -b:v 6M -f mpegts pipe:1'
+recordcmd = '/usr/local/ffmpeg-3.4.1/ffmpeg -loglevel error -thread_queue_size 256 -f alsa -i hw:2,0 -framerate 60 -thread_queue_size 512 -f v4l2 -i /dev/video0 -acodec aac -af "volume=15dB" -vcodec h264_nvenc -b:a 128k -b:v 6M -f mpegts pipe:1'
 tunercmd = '/usr/local/bin/6200ch -4 -n0 -e' # quickest tuning
 
 version = "0.2"
-ready = True
 hastuner = True
 blocksize = 1000000 # default 1MB blocksize
 
 blockbuffer=[]
-recsubprocess = None
+recsubprocess=None
 readerthread=None
 sendbytesrequestcount=0
 totalbytes=0
@@ -79,6 +78,8 @@ args = parser.parse_args()
 logpath = vars(args).get('logpath')
 loglevel = vars(args).get('loglevel')
 
+# loglevel = 'debug' # force a level
+
 # MythTV to Python log level table
 logleveltable = {
 	'emerg': logging.CRITICAL,
@@ -113,12 +114,8 @@ while True:
 		sys.stderr.flush()
 	
 	elif cmd == 'IsOpen?':
-		if ready == True:
-			logger.info("Received: 'IsOpen?' returning: " + "'OK:Open'")
-			sys.stderr.write("OK:Open"+"\n")
-		else:
-			logger.info("Received: 'IsOpen?' returning: " + "'OK:No'")
-			sys.stderr.write("OK:No"+"\n")
+		logger.info("Received: 'IsOpen?' returning: " + "'OK:Open'")
+		sys.stderr.write("OK:Open"+"\n")
 		sys.stderr.flush()
 	
 	elif cmd == 'CloseRecorder':
@@ -132,6 +129,7 @@ while True:
 			sys.stderr.write("OK:Sending "+str(sys.getsizeof(out))+" bytes"+"\n")
 			sys.stderr.flush()
 			sys.stdout.write(out)
+			sys.stdout.flush()
 		
 		logger.info("Flushing remaining buffer ("+ str(bufferbytes) +" bytes)")
 		logger.info("Returning: 'OK:Terminating'")
@@ -192,10 +190,8 @@ while True:
 		# start subprocess with video capture command that sends the transport stream to 
 		# the subprocess STDOUT
 	
-		recsubprocess = subprocess.Popen(shlex.split(recordcmd), stdout=subprocess.PIPE, stdin=DEVNULL)
-	
-		# TODO: catch errors from the subprocess and set ready=FALSE until resolved
-	
+		recsubprocess = subprocess.Popen(shlex.split(recordcmd), stdout=subprocess.PIPE, stdin=DEVNULL, stderr=subprocess.PIPE)
+		
 		# start thread to read blocksize bytes from the subprocess STDOUT into blockbuffer
 		readerthread=Thread(target=reader,args=(recsubprocess.stdout, blockbuffer, blocksize))
 		readerthread.daemon=True
@@ -216,9 +212,7 @@ while True:
 			readerthread=None
 			
 			logger.info("Received: 'StopStreaming'")
-		
-			sys.stderr.write("OK:Stopped"+"\n")
-		
+			
 			# empty remaining buffer
 			bufferbytes=0
 			while blockbuffer:
@@ -228,14 +222,18 @@ while True:
 				sys.stderr.write("OK:Sending "+str(sys.getsizeof(out))+" bytes"+"\n")
 				sys.stderr.flush()
 				sys.stdout.write(out)
+				sys.stdout.flush()
 				
 			logger.info("Flushing remaining buffer ("+ str(bufferbytes) +" bytes)")
 			logger.info("Returning: 'OK:Stopped'")
+			sys.stderr.write("OK:Stopped"+"\n")
+			sys.stderr.flush()
 		
 		else:
-			sys.stderr.write("OK"+"\n")
-		
-		sys.stderr.flush()
+			msg="ERR:Streaming subprocess not started!"
+			logger.error(msg)
+			sys.stderr.write(msg + "\n")
+			sys.stderr.flush()
 
 	elif cmd == 'SendBytes':
 		
@@ -252,20 +250,41 @@ while True:
 		
 		sendbytesrequestcount += 1 # keep count of server requests for data
 		
-		if ready==True:
-			if blockbuffer:
-				out=blockbuffer.pop(0) # leftpop
-				totalbytes += sys.getsizeof(out)
-				
-				logger.debug("Received: 'SendBytes' Returning: " + "'OK:Sending "+str(sys.getsizeof(out))+" bytes'")
-									
-				sys.stderr.write("OK:Sending "+str(sys.getsizeof(out))+" bytes"+"\n")
-				sys.stderr.flush()
-				sys.stdout.write(out)
-			else:
-				sys.stderr.write("OK"+"\n")
+		if(recsubprocess == None):
+			msg="ERR:Streaming subprocess not started!  Use 'StartStreaming' command first."
+			logger.error(msg)
+			sys.stderr.write(msg + "\n")
+			sys.stderr.flush()
+		
+		elif(recsubprocess.poll() == 1):
+			err=""
+			for line in recsubprocess.stderr:
+				err += line.strip() + "; "
+    		
+			msg="ERR:Streaming subprocess exited with error: " + err
+			logger.error(msg)
+			sys.stderr.write(msg + "\n")
+			sys.stderr.flush()
+			
+		elif(recsubprocess.poll() == 0):
+			msg="ERR:Streaming subprocess exited without errors(s)!"
+			logger.error(msg)
+			sys.stderr.write(msg + "\n")
+			sys.stderr.flush()
+			
+		elif blockbuffer:
+			out=blockbuffer.pop(0) # leftpop
+			totalbytes += sys.getsizeof(out)
+			
+			logger.debug("Received: 'SendBytes' Returning: " + "'OK:Sending "+str(sys.getsizeof(out))+" bytes'")
+			sys.stderr.write("OK:Sending "+str(sys.getsizeof(out))+" bytes"+"\n")
+			sys.stderr.flush()
+			sys.stdout.write(out)
+			sys.stdout.flush()
+			
 		else:
-			sys.stderr.write("ERR:Recorder not ready!"+"\n")
+			logger.debug("Received: 'SendBytes' Returning: No buffered bytes to send.")
+			sys.stderr.write("WARN: No buffered bytes to send."+"\n")
 			sys.stderr.flush()
 	
 	elif cmd.startswith('TuneChannel:'): # 'TuneChannel:<value>':
