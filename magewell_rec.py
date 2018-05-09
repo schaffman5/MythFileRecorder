@@ -24,15 +24,15 @@ from subprocess import call
 # Setup #
 #########
 
-recordcmd = '/usr/local/ffmpeg-3.4.1/ffmpeg -loglevel error -thread_queue_size 256 -f alsa -i hw:2,0 -framerate 60 -thread_queue_size 512 -f v4l2 -i /dev/video0 -acodec aac -af "volume=15dB" -vcodec h264_nvenc -b:a 128k -b:v 6M -f mpegts pipe:1'
-tunercmd = '/usr/local/bin/6200ch -4 -n0 -e' # quickest tuning
+inputcmd = '/usr/local/ffmpeg-3.4.1/ffmpeg -loglevel error -thread_queue_size 256 -f alsa -i hw:2,0 -framerate 60 -thread_queue_size 512 -f v4l2 -i /dev/video0 -acodec aac -af "volume=15dB" -vcodec h264_nvenc -b:a 128k -b:v 6M -f mpegts pipe:1'
+tunercmd = '/usr/local/bin/6200ch -4 -n0 -e'
 
 version = "0.2"
 hastuner = True
 blocksize = 1000000 # default 1MB blocksize
 
 blockbuffer=[]
-recsubprocess=None
+streamsubprocess=None
 readerthread=None
 sendbytesrequestcount=0
 totalbytes=0
@@ -46,10 +46,12 @@ def remove_prefix(text, prefix):
 	return text
 	
 def reader(f, buffer, bytes):
+	currentbytes=2000000 # start with a small value and progressively increase the buffer size
 	while True:
-		line=f.read(bytes)
+		line=f.read(currentbytes)
 		if line:
 			buffer.append(line)
+			currentbytes = min(int(currentbytes * 1.25), bytes)
 		else:
 			break
 
@@ -73,12 +75,18 @@ parser.add_argument('--logpath', metavar='PATH', help='Writes logging messages t
 parser.add_argument('--loglevel', metavar='LEVEL', help='Set the logging level.  All log messages at lower levels will be discarded.\nIn descending order: emerg, alert, crit, err, warning, notice, info, debug\ndefaults to info', dest='loglevel', default='info')
 parser.add_argument('-q', '--quiet', help='Don\'t log to the console (-q). [ignored]', dest='quiet', default=False, action='store_true')
 parser.add_argument('--syslog', metavar='LEVEL', help='Set the syslog logging facility.\nSet to "none" to disable, defaults to none. [ignored]', dest='syslog', default='none')
+parser.add_argument('--infile', metavar='INPUTCMD', help='Input command that returns a transport stream on STDOUT (e.g. \'ffmpeg -i /dev/video0 ... pipe:1\')', dest='inputcmd', default=inputcmd)
+parser.add_argument('--tuner', metavar='TUNERCMD', help='Path of another program which will tune the channel requested by MythTV. Must accept the channel number as the last parameter.', dest='tunercmd', default=tunercmd)
+
 
 args = parser.parse_args()
 logpath = vars(args).get('logpath')
 loglevel = vars(args).get('loglevel')
+inputcmd = vars(args).get('inputcmd')
+tunercmd = vars(args).get('tunercmd')
 
-# loglevel = 'debug' # force a level
+
+#loglevel = 'debug' # force a level
 
 # MythTV to Python log level table
 logleveltable = {
@@ -88,7 +96,8 @@ logleveltable = {
 	'err': logging.ERROR,
 	'warning': logging.WARNING,
 	'notice': logging.INFO,
-	'info': logging.INFO
+	'info': logging.INFO,
+	'debug': logging.DEBUG
 }
 
 logger = logging.getLogger('Magewell Recorder')
@@ -119,24 +128,12 @@ while True:
 		sys.stderr.flush()
 	
 	elif cmd == 'CloseRecorder':
-		logger.info("Received: 'CloseRecorder'")
-		
-		# empty remaining buffer
-		bufferbytes=0
-		while blockbuffer:
-			out=blockbuffer.pop(0) # leftpop
-			bufferbytes += sys.getsizeof(out)
-			sys.stderr.write("OK:Sending "+str(sys.getsizeof(out))+" bytes"+"\n")
-			sys.stderr.flush()
-			sys.stdout.write(out)
-			sys.stdout.flush()
-		
-		logger.info("Flushing remaining buffer ("+ str(bufferbytes) +" bytes)")
-		logger.info("Returning: 'OK:Terminating'")
-		logger.info("Summary: " + str(sendbytesrequestcount) + " 'SendBytes' requests made from server (" + str(totalbytes + bufferbytes) +" total bytes)")
-		
+		logger.info("Received: 'CloseRecorder' Returning: " + "'OK:Terminating'")
 		sys.stderr.write("OK:Terminating"+"\n")
 		sys.stderr.flush()
+				
+		logger.info("Recorder Closed - Summary: " + str(sendbytesrequestcount) + " 'SendBytes' requests made from server (" + str(totalbytes) +" total bytes)")
+		
 		break
 	
 	elif cmd == 'HasTuner?':
@@ -187,48 +184,38 @@ while True:
 		sys.stderr.flush()
 	
 	elif cmd == 'StartStreaming':
+		
+		logger.info("Received: 'StartStreaming' Returning: " + "'OK:Started'")
+		sys.stderr.write("OK:Started"+"\n")
+		sys.stderr.flush()
+		
 		# start subprocess with video capture command that sends the transport stream to 
 		# the subprocess STDOUT
 	
-		recsubprocess = subprocess.Popen(shlex.split(recordcmd), stdout=subprocess.PIPE, stdin=DEVNULL, stderr=subprocess.PIPE)
+		streamsubprocess = subprocess.Popen(shlex.split(inputcmd), stdout=subprocess.PIPE, stdin=DEVNULL, stderr=subprocess.PIPE)
 		
 		# start thread to read blocksize bytes from the subprocess STDOUT into blockbuffer
-		readerthread=Thread(target=reader,args=(recsubprocess.stdout, blockbuffer, blocksize))
+		readerthread=Thread(target=reader,args=(streamsubprocess.stdout, blockbuffer, blocksize))
 		readerthread.daemon=True
 		readerthread.start()
 		
-		logger.info("Received: 'StartStreaming' Returning: " + "'OK:Started'")
-		
-		sys.stderr.write("OK:Started"+"\n")
-		sys.stderr.flush()
-	
 	elif cmd == 'StopStreaming':
 
-		if(recsubprocess != None):
-			recsubprocess.terminate()
-			time.sleep(0.5)
-		
-			recsubprocess=None
-			readerthread=None
+		if(streamsubprocess != None):
 			
-			logger.info("Received: 'StopStreaming'")
-			
-			# empty remaining buffer
-			bufferbytes=0
-			while blockbuffer:
-				out=blockbuffer.pop(0) # leftpop
-				bufferbytes += sys.getsizeof(out)
-				totalbytes += sys.getsizeof(out)
-				sys.stderr.write("OK:Sending "+str(sys.getsizeof(out))+" bytes"+"\n")
-				sys.stderr.flush()
-				sys.stdout.write(out)
-				sys.stdout.flush()
-				
-			logger.info("Flushing remaining buffer ("+ str(bufferbytes) +" bytes)")
-			logger.info("Returning: 'OK:Stopped'")
+			logger.info("Received: 'StopStreaming' Returning: " + "'OK:Stopped'")
 			sys.stderr.write("OK:Stopped"+"\n")
 			sys.stderr.flush()
-		
+			
+			if streamsubprocess.poll() == None:
+				streamsubprocess.terminate()
+				time.sleep(0.5)
+			
+			streamsubprocess=None
+			readerthread=None
+			
+			#blockbuffer=[]
+			
 		else:
 			msg="ERR:Streaming subprocess not started!"
 			logger.error(msg)
@@ -250,15 +237,15 @@ while True:
 		
 		sendbytesrequestcount += 1 # keep count of server requests for data
 		
-		if(recsubprocess == None):
+		if(streamsubprocess == None):
 			msg="ERR:Streaming subprocess not started!  Use 'StartStreaming' command first."
 			logger.error(msg)
 			sys.stderr.write(msg + "\n")
 			sys.stderr.flush()
 		
-		elif(recsubprocess.poll() == 1):
+		elif(streamsubprocess.poll() == 1):
 			err=""
-			for line in recsubprocess.stderr:
+			for line in streamsubprocess.stderr:
 				err += line.strip() + "; "
     		
 			msg="ERR:Streaming subprocess exited with error: " + err
@@ -266,7 +253,7 @@ while True:
 			sys.stderr.write(msg + "\n")
 			sys.stderr.flush()
 			
-		elif(recsubprocess.poll() == 0):
+		elif(streamsubprocess.poll() == 0):
 			msg="ERR:Streaming subprocess exited without errors(s)!"
 			logger.error(msg)
 			sys.stderr.write(msg + "\n")
@@ -283,18 +270,20 @@ while True:
 			sys.stdout.flush()
 			
 		else:
-			logger.debug("Received: 'SendBytes' Returning: No buffered bytes to send.")
-			sys.stderr.write("WARN: No buffered bytes to send."+"\n")
+			logger.debug("Received: 'SendBytes' Returning: WARN:No buffered bytes to send.")
+			sys.stderr.write("WARN:No buffered bytes to send."+"\n")
 			sys.stderr.flush()
 	
 	elif cmd.startswith('TuneChannel:'): # 'TuneChannel:<value>':
-		logger.info("Received: '" + cmd + "' Returning: " + "'OK'")
-		
 		channel = remove_prefix(cmd, 'TuneChannel:')
-		tunersubprocess = subprocess.Popen(tunercmd + " 0" + channel, shell=True, stdout=DEVNULL, stdin=DEVNULL)
+		
+		logger.info("Received: '" + cmd + "' Returning: " + "'OK :Tuning channel to " + channel + "'")
 		sys.stderr.write("OK:Tuning channel to " + channel + "\n")
 		sys.stderr.flush()
-	
+		
+		tunersubprocess = subprocess.Popen(tunercmd + " 0" + channel, shell=True, stdout=DEVNULL, stdin=DEVNULL)
+		
 	else:
+		logger.error("Received: Unknown command '" + cmd + "'")
 		sys.stderr.write("ERR:Unknown command '" + cmd + "'" + "\n")
 		sys.stderr.flush()
