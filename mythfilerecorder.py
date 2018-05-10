@@ -4,7 +4,7 @@
 # https://www.mythtv.org/wiki/ExternalRecorder
 #
 # To run:
-# ./magewell_rec.py --logpath=/var/log/mythtv > ~/test_video_output.ts
+# ./mythfilerecorder.py --logpath=/var/log/mythtv > ~/test_video_output.ts
 # 
 # Then type commands followed by return to trigger events
 # e.g. Version? -> StartStreaming -> SendBytes -> SendBytes -> SendBytes -> StopStreaming -> CloseRecorder
@@ -68,7 +68,7 @@ class ThrowingArgumentParser(argparse.ArgumentParser):
 # Initialization #
 ##################
 
-parser = ThrowingArgumentParser(description='MythTV External Recorder implementation for Magewell Pro Capture card')
+parser = ThrowingArgumentParser(description='MythTV External Recorder Python implementation for capture from black box cards')
 
 parser.add_argument('-v', '--verbose', metavar='LEVEL', help='Specify log filtering level. [ignored]', dest='verbose', default='general')
 parser.add_argument('--logpath', metavar='PATH', help='Writes logging messages to a file in the directory logpath with filenames in the format: applicationName.date.pid.log.', dest='logpath', default='')
